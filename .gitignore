@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local checkpoints and generated experiment artifacts.
+model/
+outputs/
+
+# Local notes and reference PDFs that should not be committed.
+*.pdf
+对话记录.md
+
+# Local environment and cache files.
+.env
+.env.*
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Editor and OS files.
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,27 @@
+[project]
+name = "representation-engineering-toy-experiment"
+version = "0.1.0"
+description = "Neural CLAUDE.md toy experiment for activation-level agent harness rules"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "accelerate",
+    "httpx",
+    "matplotlib",
+    "numpy",
+    "orjson",
+    "pandas",
+    "pyarrow",
+    "pyyaml",
+    "safetensors",
+    "scipy",
+    "sglang[all]>=0.5.6",
+    "torch",
+    "tqdm",
+    "transformers",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 119
