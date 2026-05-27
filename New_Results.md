@@ -274,3 +274,89 @@ B1 does not satisfy acceptance:
 - `unrelated_kv_prefix` remains close to no-harness on injection, which suggests prefixes can matter, but not in a clean rule-specific way here.
 
 Conclusion: B1 shows that hidden KV prefixing can alter model preferences, but this implementation behaves more like a generic or order-insensitive prefix perturbation than a robust internalized harness. The next useful step is B2/B3: selected-layer activation prefix or multi-vector prefix summaries with stronger controls, or Route C learned soft-prefix/adapters.
+
+## 2026-05-27 Route B Stage B3: Multi-Layer Activation Prefix Summary
+
+### Motivation
+
+B3 removes token-level KV reuse and compiles rule text into layer-wise activation summary vectors. These vectors are injected at multiple transformer layers during scoring:
+
+```python
+h_l[:, -1, :] += alpha * resid_norm_l * v_l
+```
+
+This is closer to internalized harnessing than B1 because the model does not receive a hidden sequence of rule tokens at inference time.
+
+### Code and artifacts
+
+新增脚本：
+
+- `experiments/neural_claude_md/extract_activation_prefix_bundle.py`
+- `experiments/neural_claude_md/score_activation_prefix_preference.py`
+
+Artifacts:
+
+- safety bundle: `outputs/neural_claude_md/internal_harness_b/vectors/activation_prefix_safety_layers_12_16_20_24_27.pt`
+- unrelated bundle: `outputs/neural_claude_md/internal_harness_b/vectors/activation_prefix_logging_layers_12_16_20_24_27.pt`
+- smoke summary: `outputs/neural_claude_md/internal_harness_b/scores/b3_smoke_summary.csv`
+- compact summary: `outputs/neural_claude_md/internal_harness_b/scores/b3_compact_minimal_summary.csv`
+
+### Settings
+
+Data: compact-only held-out file-deletion prompts, 4 normal + 4 injection.
+
+Layers: `12,16,20,24,27`. Layer `28` was originally planned but Qwen2.5-7B has 28 decoder layers indexed `0..27`, so the final layer was corrected to `27`.
+
+Conditions:
+
+- `no_harness`
+- `visible_text_harness`
+- `activation_prefix_summary`
+- `unrelated_activation_prefix`
+- `random_activation_prefix`
+- `negative_activation_prefix`
+
+Alpha sweep: `0.01,0.03,0.1`.
+
+### Results
+
+Baselines:
+
+| condition | split | prefers_safe_rate | mean_margin |
+| --- | --- | ---: | ---: |
+| no_harness | normal | 1.00 | 2.0805 |
+| no_harness | injection | 0.75 | 1.8011 |
+| visible_text_harness | normal | 1.00 | 4.3096 |
+| visible_text_harness | injection | 1.00 | 1.6039 |
+
+Safety activation prefix:
+
+| alpha | split | prefers_safe_rate | mean_margin |
+| ---: | --- | ---: | ---: |
+| 0.01 | normal | 1.00 | 1.9995 |
+| 0.01 | injection | 0.75 | 1.6439 |
+| 0.03 | normal | 1.00 | 1.8133 |
+| 0.03 | injection | 0.75 | 1.3929 |
+| 0.10 | normal | 1.00 | 1.3877 |
+| 0.10 | injection | 0.75 | 0.3851 |
+
+Controls:
+
+| condition | alpha | split | prefers_safe_rate | mean_margin |
+| --- | ---: | --- | ---: | ---: |
+| random_activation_prefix | 0.03 | injection | 1.00 | 1.7487 |
+| random_activation_prefix | 0.10 | injection | 1.00 | 0.7455 |
+| negative_activation_prefix | 0.01 | injection | 1.00 | 1.8835 |
+| negative_activation_prefix | 0.03 | injection | 1.00 | 2.0023 |
+| unrelated_activation_prefix | 0.10 | injection | 0.25 | -0.7164 |
+
+### Interpretation
+
+B3 does not satisfy acceptance:
+
+- The safety activation prefix never exceeds visible text on injection `prefers_safe_rate`; it remains `0.75` for all alpha values tested.
+- Injection margin for the safety prefix peaks at `1.6439`, only slightly above visible text `1.6039`, and below no-harness `1.8011`.
+- Negative and random controls reach injection `prefers_safe_rate=1.00`, so any improvement is not rule-specific.
+- Higher alpha degrades the safety prefix margin, suggesting the multi-layer mean activation is not a stable safety rule representation.
+
+Conclusion: B3 does not rescue Route B. Both hidden KV prefix and activation-summary prefix show perturbation effects, but neither provides clean, specific, injection-resistant internalized harness behavior. The evidence now points toward Route C: learned soft prefix / adapter trained directly on rule-following under injection, with random/unrelated/negative controls retained.
