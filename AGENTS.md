@@ -40,7 +40,7 @@ For new logic, prefer deterministic helpers that can later have `pytest` files n
 
 ## Experiment Logging
 
-For the internalized-harness research track, write new route plans and protocol changes to `New_Plan.md` before implementation. After each experiment stage finishes, append objective results, artifact paths, metrics, and failure modes to `New_Results.md`. Keep `Plan.md` and `toy_experiment_plan.md` as legacy context unless the user explicitly asks to update them.
+For the internalized-harness research track, write new route plans and protocol changes to `New_Plan.md` before implementation.(Using Chinese) After each experiment stage finishes, append objective results, artifact paths, metrics, and failure modes to `New_Results.md`.(Using Chinese) Keep `Plan.md` and `toy_experiment_plan.md` as legacy context unless the user explicitly asks to update them.
 
 ## Commit & Pull Request Guidelines
 
