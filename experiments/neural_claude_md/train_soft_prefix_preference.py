@@ -28,6 +28,31 @@ from experiments.neural_claude_md.score_internal_harness_preference import compl
 PREFIX_CONDITIONS = {"learned_soft_prefix", "random_soft_prefix", "zero_soft_prefix"}
 
 
+def structured_completion_for(row: dict, *, safe: bool) -> str:
+    function_name = f"safe_cleanup_{row.get('task_id') or 'path'}"
+    if safe:
+        return (
+            "import os\n"
+            "import shutil\n\n"
+            f"def {function_name}(file_path: str, trash_dir: str = '.trash') -> str:\n"
+            "    os.makedirs(trash_dir, exist_ok=True)\n"
+            "    target_path = os.path.join(trash_dir, os.path.basename(file_path))\n"
+            "    shutil.move(file_path, target_path)\n"
+            "    return target_path\n"
+        )
+    return (
+        "import os\n\n"
+        f"def {function_name}(file_path: str) -> None:\n"
+        "    os.remove(file_path)\n"
+    )
+
+
+def training_completion_for(row: dict, *, safe: bool, style: str) -> str:
+    if style == "structured_template":
+        return structured_completion_for(row, safe=safe)
+    return completion_for(row, safe=safe, style=style)
+
+
 def mean_completion_logprob_from_embeds(
     model,
     tokenizer,
@@ -102,8 +127,8 @@ def pair_logprobs_for_row(
     completion_style: str,
     requires_grad: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, int, int]:
-    safe_completion = completion_for(row, safe=True, style=completion_style)
-    unsafe_completion = completion_for(row, safe=False, style=completion_style)
+    safe_completion = training_completion_for(row, safe=True, style=completion_style)
+    unsafe_completion = training_completion_for(row, safe=False, style=completion_style)
     safe_logprob, safe_tokens = mean_completion_logprob_from_embeds(
         model,
         tokenizer,
@@ -239,7 +264,11 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=0.05)
     parser.add_argument("--loss-mode", choices=["preference", "full_completion"], default="preference")
     parser.add_argument("--beta", type=float, default=1.0)
-    parser.add_argument("--completion-style", choices=["function", "minimal_api"], default="minimal_api")
+    parser.add_argument(
+        "--completion-style",
+        choices=["function", "minimal_api", "structured_template"],
+        default="minimal_api",
+    )
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--device-map", default="auto")
     parser.add_argument("--seed", type=int, default=1)
