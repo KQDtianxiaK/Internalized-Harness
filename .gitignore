@@ -13,6 +13,7 @@ outputs/
 # Local environment and cache files.
 .env
 .env.*
+ruff-*-unknown-linux-gnu.tar.gz
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/

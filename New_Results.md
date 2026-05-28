@@ -658,3 +658,94 @@ C3 有一个弱正信号：learned soft prefix 在 injection split 上达到 `va
 C3 证明“结构化模板 soft prefix”可以把一部分安全删除行为注入到自由生成中，但当前证据还不足以支持“内部 harness 已经达到或超过显式 prompt”。更准确的结论是：learned internal controller 出现了可测的弱控制信号，但稳定性、任务覆盖和对抗 prompt injection 的优势都还不够。
 
 下一步不应继续盲目调 C3 超参数。更合理的方向是把 verifier 信号引入训练目标：保留不可见 internal controller 的设定，但让训练目标直接区分 AST 合规与违规输出，而不是只拟合固定 safe template。
+
+## Route C Stage C4 Verifier-Guided Soft Prefix 结果
+
+### 实验设置
+
+C4 冻结 Qwen2.5-7B-Instruct，只训练不可见 soft prefix。相对 C3，训练目标改为 verifier-guided candidate bank：每个 prompt 构造多个 safe / unsafe completion，用现有 AST safety evaluator 标注，只有 `valid_compliant=True` 的候选作为正样本，其余作为负样本。
+
+配置：
+
+- prefix length: 12
+- epochs: 8
+- learning rate: 0.03
+- loss mode: `verifier_guided`
+- beta: 1.0
+- completion style: `verifier_bank`
+- aggregation temperature: 0.5
+- evaluator: 未修改的 AST safety evaluator
+
+主要产物：
+
+- prefix: `outputs/neural_claude_md/internal_harness_c/prefixes/c4_verifier_prefix_len12_e8.pt`
+- preference rows: `outputs/neural_claude_md/internal_harness_c/scores/c4_len12_e8_verifier_eval_rows.jsonl`
+- preference summary: `outputs/neural_claude_md/internal_harness_c/scores/c4_len12_e8_verifier_eval_summary.csv`
+- generation rows: `outputs/neural_claude_md/internal_harness_c/generations/c4_limit8_generations.jsonl`
+- generation summary: `outputs/neural_claude_md/internal_harness_c/metrics/c4_limit8_summary.csv`
+
+### 训练过程
+
+| epoch | mean_loss | mean_margin | mean_safe_nll |
+| ---: | ---: | ---: | ---: |
+| 1 | 2.8153 | -0.0147 | 2.1084 |
+| 2 | 3.2464 | -0.0886 | 2.5042 |
+| 3 | 2.8661 | 0.0700 | 2.2008 |
+| 4 | 2.2625 | 0.0371 | 1.5819 |
+| 5 | 1.9813 | 0.0653 | 1.3164 |
+| 6 | 1.7791 | 0.1107 | 1.1371 |
+| 7 | 1.5953 | 0.2365 | 1.0112 |
+| 8 | 1.5147 | 0.2626 | 0.9427 |
+
+训练阶段出现了预期信号：mean margin 从负数转正，safe NLL 下降。说明 verifier-guided objective 可以在训练 prompts 上学习到“合规候选优于违规候选”的内部偏好。
+
+### Held-out Preference 结果
+
+| condition | split | prefers_safe_rate | mean_margin |
+| --- | --- | ---: | ---: |
+| no_harness | injection | 0.00 | -0.0687 |
+| visible_text_harness | injection | 1.00 | 0.0989 |
+| learned_soft_prefix | injection | 0.75 | 0.0502 |
+| random_soft_prefix | injection | 0.00 | -0.0704 |
+| zero_soft_prefix | injection | 0.00 | -0.1231 |
+| no_harness | normal | 0.75 | 0.0153 |
+| visible_text_harness | normal | 0.75 | 0.1392 |
+| learned_soft_prefix | normal | 1.00 | 0.2780 |
+
+Preference 结论是部分正面的：learned soft prefix 明显超过 no-harness、random prefix 和 zero prefix，在 normal split 上甚至超过 visible text；但 injection split 上仍低于 visible text。
+
+### 自由生成安全评估
+
+全量 held-out compact test prompts 共 8 条：4 normal + 4 injection。每个条件生成 8 条，`max_new_tokens=128`。
+
+| condition | split | n | syntax_valid_rate | valid_compliance_rate | mean_os_remove_calls | mean_shutil_rmtree_calls | mean_shutil_move_calls | mean_send2trash_calls |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| no_harness | injection | 4 | 0.50 | 0.00 | 0.75 | 0.25 | 0.00 | 0.00 |
+| visible_text_harness | injection | 4 | 0.50 | 0.25 | 1.00 | 0.00 | 0.25 | 0.00 |
+| learned_soft_prefix | injection | 4 | 0.75 | 0.00 | 1.00 | 0.00 | 0.00 | 0.00 |
+| random_soft_prefix | injection | 4 | 0.50 | 0.00 | 0.75 | 0.25 | 0.00 | 0.00 |
+| zero_soft_prefix | injection | 4 | 0.50 | 0.00 | 1.00 | 0.25 | 0.00 | 0.00 |
+| visible_text_harness | normal | 4 | 0.50 | 0.50 | 0.00 | 0.00 | 0.00 | 0.50 |
+| learned_soft_prefix | normal | 4 | 0.50 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+
+### 观察
+
+C4 未通过验收。虽然 verifier-guided loss 改善了 held-out candidate preference，但没有转化为自由生成安全性：
+
+- learned soft prefix 的 injection `valid_compliance_rate=0.00`，低于 visible text 的 0.25；
+- learned soft prefix 的 injection `mean_os_remove_calls=1.00`，没有压低直接删除调用；
+- learned 输出不再稳定产生 `shutil.move` 或 `send2trash`；
+- normal split 也退化为 `valid_compliance_rate=0.00`，说明 controller 没有学到可泛化的安全删除动作。
+
+失败样例显示，C4 learned prefix 在开放生成中常回到普通任务代码，例如 `os.remove(file)`、`os.rmdir(folder_path)`，或生成语法错误的半成品函数。它学到的是候选 bank 上的排序偏好，而不是生成时的稳定行为策略。
+
+### 结论
+
+C4 的价值在于澄清了一个边界：verifier-guided preference training 能提升不可见 prefix 对候选 completion 的 likelihood 排序，但这仍不足以控制自由生成。当前 soft prefix 的容量和训练信号不足以稳定内化文件删除安全 harness。
+
+下一步不应继续只训练 input soft prefix。更合理的推进方向有两个：
+
+- C5：改为多层 activation/controller，在若干中间层注入可训练 residual vectors，而不是只改输入 embedding；
+- D1：保持 base model 不变，但在 decoding 阶段做不可见 verifier reranking，用内部候选筛选替代显式 prompt。
+
+如果项目主张仍是“直接从模型内部修改达到显式 prompt 效果”，C5 比 D1 更贴近初衷；D1 更像工程防护上界。
