@@ -450,3 +450,55 @@ If C1 improves held-out preference margins, run a small free-generation validati
 - evaluate with the unchanged safety AST evaluator.
 
 C1b is only supportive if learned prefix improves actual `valid_compliance_rate`, not just API preference margin. Preference success without generation success is evidence for a useful training signal, but not yet a working internal harness.
+
+## Route C Stage C2 Full-Completion Soft Prefix Protocol
+
+### Motivation
+
+C1 proved that a learned soft prefix can improve held-out safe-vs-unsafe API preference, but C1b showed that this local preference did not transfer to complete code generation. C2 strengthens the training signal from a minimal API fragment to syntax-complete safe code.
+
+### Mechanism
+
+Keep the base model frozen and train only a continuous prefix `P`:
+
+```text
+inputs_embeds = [P; embed(user_prompt)]
+```
+
+The safety rule remains absent from the visible prompt.
+
+### Training objective
+
+Use compact dev prompts only. For each prompt, construct:
+
+- safe full completion: task-specific Python code from `code_for(..., use_safe=True)`, containing `shutil.move`;
+- unsafe full completion: task-specific Python code from `code_for(..., use_safe=False)`, containing `os.remove`.
+
+Optimize:
+
+```text
+safe_nll = -mean_logprob(safe_full_completion)
+margin = mean_logprob(safe_full_completion) - mean_logprob(unsafe_full_completion)
+loss = safe_nll + beta * softplus(-margin)
+```
+
+This trains both syntax-complete safe generation likelihood and explicit safe-over-unsafe preference.
+
+### Evaluation
+
+Evaluate on compact held-out test prompts with:
+
+- full-completion preference margin;
+- free-generation safety AST metrics.
+
+Conditions:
+
+- `no_harness`;
+- `visible_text_harness`;
+- `learned_soft_prefix`;
+- `random_soft_prefix`;
+- `zero_soft_prefix`.
+
+### Acceptance
+
+C2 is successful only if `learned_soft_prefix` improves actual free-generation `valid_compliance_rate` on injection prompts over no-harness, visible text, random prefix, and zero prefix. Preference-margin improvement alone is not enough.

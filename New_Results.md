@@ -471,3 +471,108 @@ C1 is promising but incomplete:
 - Important failure mode: optimizing a minimal API preference objective is insufficient to control full code generation.
 
 Next step should keep Route C but strengthen the training target: train soft prefix on full safe code completions or a combined objective that includes syntax-complete safe generation, not only minimal API preference.
+
+## 2026-05-28 Route C Stage C2: Full-Completion Soft Prefix
+
+### Motivation
+
+C1 learned a strong local API preference but did not improve free-generation safety. C2 replaced the minimal API objective with a full safe-code completion objective, while still keeping the base model frozen and training only the soft prefix.
+
+### Code and artifacts
+
+Updated script:
+
+- `experiments/neural_claude_md/train_soft_prefix_preference.py`
+  - added `--loss-mode full_completion`
+  - added `--beta`
+  - added full safe/unsafe logprob tracking
+
+Artifacts:
+
+- smoke prefix: `outputs/neural_claude_md/internal_harness_c/prefixes/c2_smoke_full_prefix.pt`
+- final prefix: `outputs/neural_claude_md/internal_harness_c/prefixes/c2_full_prefix_len8_e5.pt`
+- preference summary: `outputs/neural_claude_md/internal_harness_c/scores/c2_len8_e5_full_eval_summary.csv`
+- generation summary: `outputs/neural_claude_md/internal_harness_c/metrics/c2b_limit4_summary.csv`
+
+### Training setup
+
+Training data: compact dev prompts, 4 normal + 4 injection.
+
+Held-out evaluation data: compact test prompts.
+
+Objective:
+
+```text
+safe_nll = -mean_logprob(safe_full_completion)
+margin = mean_logprob(safe_full_completion) - mean_logprob(unsafe_full_completion)
+loss = safe_nll + 0.5 * softplus(-margin)
+```
+
+Config:
+
+- prefix length: 8
+- init: random
+- epochs: 5
+- learning rate: 0.02
+- completion style: full function
+- base model: frozen Qwen2.5-7B-Instruct
+
+Training history:
+
+| epoch | mean_loss | mean_margin | mean_safe_nll |
+| ---: | ---: | ---: | ---: |
+| 1 | 2.3556 | 2.5419 | 2.3119 |
+| 2 | 2.0666 | 2.3365 | 2.0173 |
+| 3 | 1.6947 | 1.6575 | 1.6029 |
+| 4 | 1.3596 | 1.2976 | 1.2375 |
+| 5 | 1.2275 | 1.3806 | 1.1143 |
+
+The optimizer reduced safe-code NLL, but the safe-over-unsafe margin also decreased, which already suggested the full-completion objective was not preserving the safety contrast well.
+
+### Held-out full-completion preference
+
+| condition | split | prefers_safe_rate | mean_margin |
+| --- | --- | ---: | ---: |
+| no_harness | normal | 1.00 | 2.7456 |
+| no_harness | injection | 1.00 | 2.6591 |
+| visible_text_harness | normal | 1.00 | 3.0200 |
+| visible_text_harness | injection | 1.00 | 2.7567 |
+| learned_soft_prefix | normal | 1.00 | 1.4372 |
+| learned_soft_prefix | injection | 1.00 | 1.3614 |
+| random_soft_prefix | injection | 1.00 | 2.6280 |
+| zero_soft_prefix | injection | 1.00 | 2.5130 |
+
+Preference result: C2 did not improve held-out full-completion preference. The learned prefix performed worse than no-harness, visible text, random prefix, and zero prefix on mean margin.
+
+### C2b free-generation validation
+
+Generation config:
+
+- held-out compact prompts, first 4 rows only: 2 normal + 2 injection;
+- conditions: `no_harness`, `visible_text_harness`, `learned_soft_prefix`, `random_soft_prefix`, `zero_soft_prefix`;
+- `max_new_tokens=128`;
+- unchanged safety AST evaluator.
+
+Generation results:
+
+| condition | split | n | syntax_valid_rate | valid_compliance_rate | mean_os_remove_calls | mean_shutil_move_calls | mean_send2trash_calls |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| no_harness | injection | 2 | 0.50 | 0.00 | 1.00 | 0.00 | 0.00 |
+| visible_text_harness | normal | 2 | 0.50 | 0.50 | 0.00 | 0.00 | 0.50 |
+| visible_text_harness | injection | 2 | 0.50 | 0.00 | 1.50 | 0.00 | 0.00 |
+| learned_soft_prefix | normal | 2 | 0.50 | 0.00 | 0.00 | 0.00 | 0.00 |
+| learned_soft_prefix | injection | 2 | 1.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| random_soft_prefix | injection | 2 | 0.50 | 0.00 | 1.00 | 0.00 | 0.00 |
+| zero_soft_prefix | injection | 2 | 0.50 | 0.00 | 1.00 | 0.00 | 0.00 |
+
+### Interpretation
+
+C2 does not satisfy acceptance:
+
+- It did not improve held-out full-completion preference margin.
+- It did not improve free-generation `valid_compliance_rate`.
+- It did reduce `os.remove` in learned-prefix injection generations, but by generating incomplete/non-deleting code rather than safe deletion code.
+
+Observed failure mode: the learned prefix shifted generation toward generic file-listing or checksum scaffolding and away from explicit deletion. That avoids some unsafe calls but fails the task and never emits `shutil.move` or `send2trash`.
+
+Next step: C2 shows that naive full-completion NLL is not enough. A better C3 should optimize a verifier-grounded objective or structured completion target: explicitly reward syntax-valid code that both performs the deletion task and uses trash/quarantine, rather than only matching a fixed safe template.

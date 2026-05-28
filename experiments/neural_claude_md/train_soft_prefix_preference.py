@@ -80,6 +80,28 @@ def margin_for_row(
     completion_style: str,
     requires_grad: bool,
 ) -> tuple[torch.Tensor, int, int]:
+    safe_logprob, unsafe_logprob, safe_tokens, unsafe_tokens = pair_logprobs_for_row(
+        model,
+        tokenizer,
+        row,
+        prefix=prefix,
+        system_prompt=system_prompt,
+        completion_style=completion_style,
+        requires_grad=requires_grad,
+    )
+    return safe_logprob - unsafe_logprob, safe_tokens, unsafe_tokens
+
+
+def pair_logprobs_for_row(
+    model,
+    tokenizer,
+    row: dict,
+    *,
+    prefix: torch.Tensor | None,
+    system_prompt: str | None,
+    completion_style: str,
+    requires_grad: bool,
+) -> tuple[torch.Tensor, torch.Tensor, int, int]:
     safe_completion = completion_for(row, safe=True, style=completion_style)
     unsafe_completion = completion_for(row, safe=False, style=completion_style)
     safe_logprob, safe_tokens = mean_completion_logprob_from_embeds(
@@ -100,7 +122,7 @@ def margin_for_row(
         system_prompt=system_prompt,
         requires_grad=requires_grad,
     )
-    return safe_logprob - unsafe_logprob, safe_tokens, unsafe_tokens
+    return safe_logprob, unsafe_logprob, safe_tokens, unsafe_tokens
 
 
 def init_prefix(model, tokenizer, *, prefix_len: int, init: str, seed: int) -> torch.nn.Parameter:
@@ -152,7 +174,7 @@ def evaluate(
     for condition, prefix, system_prompt in conditions:
         for row in tqdm(rows, desc=f"eval {condition}"):
             started = time.time()
-            margin, safe_tokens, unsafe_tokens = margin_for_row(
+            safe_logprob, unsafe_logprob, safe_tokens, unsafe_tokens = pair_logprobs_for_row(
                 model,
                 tokenizer,
                 row,
@@ -161,6 +183,7 @@ def evaluate(
                 completion_style=completion_style,
                 requires_grad=False,
             )
+            margin = safe_logprob - unsafe_logprob
             margin_value = float(margin.item())
             out_rows.append(
                 {
@@ -171,6 +194,8 @@ def evaluate(
                     "variant_id": row.get("variant_id"),
                     "base_index": row.get("base_index"),
                     "completion_style": completion_style,
+                    "safe_mean_logprob": float(safe_logprob.item()),
+                    "unsafe_mean_logprob": float(unsafe_logprob.item()),
                     "margin": margin_value,
                     "prefers_safe": margin_value > 0,
                     "safe_tokens": safe_tokens,
@@ -212,6 +237,8 @@ def main() -> None:
     parser.add_argument("--init", choices=["random", "safety_mean"], default="random")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=0.05)
+    parser.add_argument("--loss-mode", choices=["preference", "full_completion"], default="preference")
+    parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--completion-style", choices=["function", "minimal_api"], default="minimal_api")
     parser.add_argument("--dtype", default="bf16")
     parser.add_argument("--device-map", default="auto")
@@ -236,8 +263,9 @@ def main() -> None:
     for epoch in range(args.epochs):
         total_loss = 0.0
         total_margin = 0.0
+        total_safe_nll = 0.0
         for row in tqdm(train_rows, desc=f"train epoch {epoch + 1}/{args.epochs}"):
-            margin, _, _ = margin_for_row(
+            safe_logprob, unsafe_logprob, _, _ = pair_logprobs_for_row(
                 model,
                 tokenizer,
                 row,
@@ -246,22 +274,30 @@ def main() -> None:
                 completion_style=args.completion_style,
                 requires_grad=True,
             )
-            loss = F.softplus(-margin)
+            margin = safe_logprob - unsafe_logprob
+            safe_nll = -safe_logprob
+            if args.loss_mode == "preference":
+                loss = F.softplus(-margin)
+            else:
+                loss = safe_nll + args.beta * F.softplus(-margin)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             total_loss += float(loss.detach().item())
             total_margin += float(margin.detach().item())
+            total_safe_nll += float(safe_nll.detach().item())
         history.append(
             {
                 "epoch": epoch + 1,
                 "mean_loss": total_loss / len(train_rows),
                 "mean_margin": total_margin / len(train_rows),
+                "mean_safe_nll": total_safe_nll / len(train_rows),
             }
         )
         print(
             f"epoch={epoch + 1} mean_loss={history[-1]['mean_loss']:.4f} "
-            f"mean_margin={history[-1]['mean_margin']:.4f}"
+            f"mean_margin={history[-1]['mean_margin']:.4f} "
+            f"mean_safe_nll={history[-1]['mean_safe_nll']:.4f}"
         )
 
     prefix_path = Path(args.prefix_output)
@@ -275,6 +311,8 @@ def main() -> None:
                 "init": args.init,
                 "epochs": args.epochs,
                 "lr": args.lr,
+                "loss_mode": args.loss_mode,
+                "beta": args.beta,
                 "completion_style": args.completion_style,
                 "train_prompts": str(Path(args.train_prompts)),
                 "eval_prompts": str(Path(args.eval_prompts)),
