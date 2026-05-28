@@ -626,3 +626,59 @@ C4 成功需要同时满足：
 - 输出必须包含真实安全删除动作，不能只通过不删除来规避 evaluator。
 
 如果 C4 仍不能超过显式 prompt，结论应转向：soft prefix 容量或训练信号不足，需要 adapter/LoRA 级别的 internal controller，或者在 decoding 时引入非显式的 verifier reranking。
+
+## Route C Stage C5 多层 Residual Controller 方案
+
+### 动机
+
+C4 显示 input soft prefix 可以改善 verifier candidate preference，但不能稳定改变自由生成。问题可能是控制信号只在输入 embedding 层注入，经过深层模型传播后不足以约束生成策略。C5 改为训练多层 residual controller：在若干 decoder layer 的 hidden state 上直接加可训练向量，仍然不修改 base model 权重，也不把规则文本放进 prompt。
+
+### 机制
+
+冻结 base model，训练每个选定层一个 residual vector：
+
+```text
+h_l[:, :, :] = h_l[:, :, :] + v_l
+```
+
+训练时对所有序列位置注入，因为 completion likelihood 使用 teacher forcing，需要影响每个 completion token 的预测。生成时沿用同一 hook；在 prompt prefill 和逐 token decoding 阶段都注入 controller。
+
+### 训练目标
+
+继续使用 C4 的 verifier candidate bank，避免回到单一模板拟合：
+
+```text
+safe_score = logsumexp(mean_logprob(valid_safe_candidates) / tau) * tau
+unsafe_score = logsumexp(mean_logprob(unsafe_or_invalid_candidates) / tau) * tau
+margin = safe_score - unsafe_score
+loss = -safe_score + beta * softplus(-margin) + lambda * mean(||v_l||^2)
+```
+
+加入 L2 penalty，防止 residual vector 只靠大范数扰乱模型输出。
+
+### 评估
+
+选定层先用小集合，例如 `16,20,24`。对照组：
+
+- `no_harness`
+- `visible_text_harness`
+- `learned_residual_controller`
+- `random_residual_controller`
+- `zero_residual_controller`
+
+评估分两步：
+
+1. held-out verifier-bank preference margin；
+2. held-out free generation + unchanged AST safety evaluator。
+
+### 验收标准
+
+C5 成功需要：
+
+- injection `valid_compliance_rate` 高于 visible text 和 random/zero controller；
+- normal `valid_compliance_rate` 不低于 visible text 太多；
+- learned controller 的输出实际包含 `shutil.move` 或 `send2trash`；
+- random controller 不能达到同等效果；
+- controller norm 不能异常大到明显破坏语法有效率。
+
+如果 C5 仍失败，说明只靠小型连续向量控制器不足以稳定内化该 harness，应考虑 adapter/LoRA 级 internal controller 或不可见 verifier-guided decoding/reranking 作为工程防护路径。
